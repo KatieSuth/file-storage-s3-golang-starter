@@ -1,10 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"net/http"
 	"io"
-	"encoding/base64"
+	"mime"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
 	"github.com/google/uuid"
@@ -67,11 +71,42 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	//encode the thumbnail
-	encoded := base64.StdEncoding.EncodeToString(image)
+	//determine image extension
+	mimeType, _, err := mime.ParseMediaType(mediaType)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Could not determine file type", err)
+		return
+	}
+
+	if mimeType != "image/jpeg" && mimeType != "image/png" {
+		respondWithError(w, http.StatusBadRequest, "Unallowed file type", err)
+		return
+	}
+
+	typeArr := strings.Split(mediaType, "/")
+	ext := typeArr[(len(typeArr) - 1)]
+
+	//save the thumbnail
+	path := filepath.Join(cfg.assetsRoot, videoIDString)
+	path = path + "." + ext
+
+	diskFile, err := os.Create(path)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Could not create the thumbnail file", err)
+		return
+	}
+	defer diskFile.Close()
+
+	sReader := bytes.NewReader(image)
+
+	_, err = io.Copy(diskFile, sReader)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Could not store thumbnail to disk", err)
+		return
+	}
 
 	//update video metadata with thumnail URL
-	url := fmt.Sprintf("data:%s;base64,%s", mediaType, encoded)
+	url := "http://localhost:8091/" + path
 	video.ThumbnailURL = &url
 	err = cfg.db.UpdateVideo(video)
 
