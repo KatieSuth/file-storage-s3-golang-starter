@@ -2,10 +2,12 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
-	"net/http"
 	"io"
 	"mime"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,7 +35,6 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		respondWithError(w, http.StatusUnauthorized, "Couldn't validate JWT", err)
 		return
 	}
-
 
 	fmt.Println("uploading thumbnail for video", videoID, "by user", userID)
 
@@ -87,7 +88,11 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 	ext := typeArr[(len(typeArr) - 1)]
 
 	//save the thumbnail
-	path := filepath.Join(cfg.assetsRoot, videoIDString)
+	imgNameKey := make([]byte, 32)
+	rand.Read(imgNameKey)
+	imgName := base64.RawURLEncoding.EncodeToString(imgNameKey)
+
+	path := filepath.Join(cfg.assetsRoot, imgName)
 	path = path + "." + ext
 
 	diskFile, err := os.Create(path)
@@ -105,7 +110,7 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	//update video metadata with thumnail URL
+	//update video metadata with thumbnail URL
 	url := "http://localhost:8091/" + path
 	video.ThumbnailURL = &url
 	err = cfg.db.UpdateVideo(video)
