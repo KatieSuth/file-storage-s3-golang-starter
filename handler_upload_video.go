@@ -5,13 +5,10 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
-	"encoding/json"
-	"fmt"
 	"io"
 	"mime"
 	"net/http"
 	"os"
-	"os/exec"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
@@ -106,11 +103,26 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	//reset the file pointer
 	tmpFile.Seek(0, io.SeekStart)
 
+	//update the video for faster processing
+	fastPath, err := processVideoForFastStart(tmpFile.Name())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Could store fast file to disk", err)
+		return
+	}
+	defer os.Remove(fastPath)
+
+	fastFile, err := os.Open(fastPath)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Could open fast file", err)
+		return
+	}
+	defer fastFile.Close()
+
 	//create filename
 	videoNameKey := make([]byte, 32)
 	rand.Read(videoNameKey)
 
-	aspectRatio, _ := getVideoAspectRatio(tmpFile.Name())
+	aspectRatio, _ := getVideoAspectRatio(fastPath)
 	orientation := "other"
 
 	switch aspectRatio {
@@ -120,15 +132,22 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		orientation = "landscape"
 	}
 
-	videoName := orientation + "/" + base64.RawURLEncoding.EncodeToString(videoNameKey) + ".mp4"
-
 	//save to S3
+	key := orientation + "/" + base64.RawURLEncoding.EncodeToString(videoNameKey) + ".mp4"
+	videoName := cfg.s3Bucket + "," + key
+	video.VideoURL = &videoName
+	err = cfg.db.UpdateVideo(video)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Could not store video file with video", err)
+		return
+	}
+
 	emptyContext := context.Background()
 
 	objectInput := s3.PutObjectInput{
 		Bucket:      &cfg.s3Bucket,
-		Key:         &videoName,
-		Body:        tmpFile,
+		Key:         &key,
+		Body:        fastFile,
 		ContentType: &mimeType,
 	}
 
@@ -139,48 +158,22 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	}
 
 	//update video metadata with video URL
-	url := fmt.Sprintf("https://%s.s3.%s.amazonaws.com/%s", cfg.s3Bucket, cfg.s3Region, videoName)
-	video.VideoURL = &url
-	err = cfg.db.UpdateVideo(video)
+	/*
+		url := fmt.Sprintf("https://%s.s3.%s.amazonaws.com/%s", cfg.s3Bucket, cfg.s3Region, videoName)
+		video.VideoURL = &url
+		err = cfg.db.UpdateVideo(video)
 
-	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Could not store video file with video", err)
-		return
-	}
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, "Could not store video file with video", err)
+			return
+		}
+	*/
 
 	//respond with updated metadata
-	respondWithJSON(w, http.StatusOK, video)
-}
-
-func getVideoAspectRatio(filePath string) (string, error) {
-	cmd := exec.Command("ffprobe", "-v", "error", "-print_format", "json", "-show_streams", filePath)
-
-	var stdout bytes.Buffer
-	cmd.Stdout = &stdout
-	err := cmd.Run()
-
+	signedVideo, err := cfg.dbVideoToSignedVideo(video)
 	if err != nil {
-		return "", err
+		respondWithError(w, http.StatusNotFound, "Couldn't get signed video URL", err)
+		return
 	}
-
-	var stream map[string]interface{}
-
-	output := stdout.Bytes()
-	err = json.Unmarshal(output, &stream)
-
-	if err != nil {
-		return "", err
-	}
-
-	streams := stream["streams"].([]interface{})
-	aspectRatio := "other"
-	for _, stream := range streams {
-		str := stream.(map[string]interface{})
-		if str["display_aspect_ratio"] == "16:9" || str["display_aspect_ratio"] == "9:16" {
-			aspectRatio = fmt.Sprintf("%s", str["display_aspect_ratio"])
-		}
-		break
-	}
-
-	return aspectRatio, nil
+	respondWithJSON(w, http.StatusOK, signedVideo)
 }
